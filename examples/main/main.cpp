@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 
 // Terminal color map. 10 colors grouped in ranges [0.0, 0.1, ..., 0.9]
 // Lowest is red, middle is yellow, highest is green.
@@ -31,6 +32,31 @@ std::string to_timestamp(int64_t t, bool comma = false) {
     snprintf(buf, sizeof(buf), "%02d:%02d:%02d%s%03d", (int) hr, (int) min, (int) sec, comma ? "," : ".", (int) msec);
 
     return std::string(buf);
+}
+
+// Read segments from file. A segment is a whitespace separated tuple of
+// (start-ms, duration-ms); typically one tuple per line, but parser uses
+// pairwise ifstream pipe to int32_t.
+std::vector<std::pair<int32_t, int32_t>> segments_from_file(const char *fname) {
+    std::ifstream ifs(fname);
+
+    if (!ifs) {
+        fprintf(stderr, "Failed to open file %s\n", fname);
+        exit(1);
+    }
+
+    int32_t start, duration;
+    int32_t total_duration = 0;
+    std::vector<std::pair<int32_t, int32_t>> segments = {};
+    while(!ifs.eof()) {
+        ifs >> start >> duration;
+        total_duration += duration;
+        segments.push_back(std::make_pair(start, duration));
+    }
+
+    fprintf(stderr, "Read in %lu segments (%.3f seconds)\n", segments.size(), total_duration/1000.);
+    
+    return segments;
 }
 
 int timestamp_to_sample(int64_t t, int n_samples) {
@@ -84,6 +110,11 @@ struct whisper_params {
 
     std::vector<std::string> fname_inp = {};
     std::vector<std::string> fname_out = {};
+
+    // this will be updated during decoding so that the output callback can
+    // reference the current segment
+    int32_t current_segment = 0;
+    std::vector<std::pair<int32_t, int32_t>> segments = {};
 };
 
 void whisper_print_usage(int argc, char ** argv, const whisper_params & params);
@@ -110,6 +141,7 @@ bool whisper_params_parse(int argc, char ** argv, whisper_params & params) {
         else if (arg == "-p"    || arg == "--processors")     { params.n_processors   = std::stoi(argv[++i]); }
         else if (arg == "-ot"   || arg == "--offset-t")       { params.offset_t_ms    = std::stoi(argv[++i]); }
         else if (arg == "-on"   || arg == "--offset-n")       { params.offset_n       = std::stoi(argv[++i]); }
+        else if (arg == "-s"    || arg == "--segments")       { params.segments       = segments_from_file(argv[++i]); }
         else if (arg == "-d"    || arg == "--duration")       { params.duration_ms    = std::stoi(argv[++i]); }
         else if (arg == "-mc"   || arg == "--max-context")    { params.max_context    = std::stoi(argv[++i]); }
         else if (arg == "-ml"   || arg == "--max-len")        { params.max_len        = std::stoi(argv[++i]); }
@@ -158,6 +190,7 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -ot N,     --offset-t N        [%-7d] time offset in milliseconds\n",                    params.offset_t_ms);
     fprintf(stderr, "  -on N,     --offset-n N        [%-7d] segment index offset\n",                           params.offset_n);
     fprintf(stderr, "  -d  N,     --duration N        [%-7d] duration of audio to process in milliseconds\n",   params.duration_ms);
+    fprintf(stderr, "  -s FNAME,  --segments FNAME    [%-7s] file containing start times and durations in milliseconds\n", "");
     fprintf(stderr, "  -mc N,     --max-context N     [%-7d] maximum number of text context tokens to store\n", params.max_context);
     fprintf(stderr, "  -ml N,     --max-len N         [%-7d] maximum segment length in characters\n",           params.max_len);
     fprintf(stderr, "  -sow,      --split-on-word     [%-7s] split on word rather than on token\n",             params.split_on_word ? "true" : "false");
@@ -218,7 +251,10 @@ void whisper_print_segment_callback(struct whisper_context * ctx, int n_new, voi
         }
 
         if (!params.no_timestamps) {
-            printf("[%s --> %s]  ", to_timestamp(t0).c_str(), to_timestamp(t1).c_str());
+            if (params.segments.size() > 0)
+                printf("[%d %s --> %s]  ", params.current_segment, to_timestamp(t0).c_str(), to_timestamp(t1).c_str());
+            else
+                printf("[%s --> %s]  ", to_timestamp(t0).c_str(), to_timestamp(t1).c_str());
         }
 
         if (params.diarize && pcmf32s.size() == 2) {
@@ -615,9 +651,22 @@ int main(int argc, char ** argv) {
                 wparams.encoder_begin_callback_user_data = &is_aborted;
             }
 
-            if (whisper_full_parallel(ctx, wparams, pcmf32.data(), pcmf32.size(), params.n_processors) != 0) {
-                fprintf(stderr, "%s: failed to process audio\n", argv[0]);
-                return 10;
+            if (params.segments.size() == 0) {
+                if (whisper_full_parallel(ctx, wparams, pcmf32.data(), pcmf32.size(), params.n_processors) != 0) {
+                    fprintf(stderr, "%s: failed to process audio\n", argv[0]);
+                    return 10;
+                }
+            } else {
+                for (int i = 0; i < params.segments.size(); i++) {
+                    params.current_segment = i;
+                    wparams.offset_ms        = params.segments[i].first;
+                    wparams.duration_ms      = params.segments[i].second;
+
+                    if (whisper_full_parallel(ctx, wparams, pcmf32.data(), pcmf32.size(), params.n_processors) != 0) {
+                        fprintf(stderr, "%s: failed to process audio\n", argv[0]);
+                        return 10;
+                    }
+                }
             }
         }
 

@@ -50,7 +50,18 @@ std::vector<std::pair<int32_t, int32_t>> segments_from_file(const char *fname) {
     std::vector<std::pair<int32_t, int32_t>> segments = {};
     while(!ifs.eof()) {
         ifs >> start >> duration;
+        if (start < 0) {
+          fprintf(stderr, "Invalid start offset for segment %ld", segments.size()+1);
+          exit (1);
+        }
+
         total_duration += duration;
+
+        // ensure minimum of half second duration
+        if (duration < 500) {
+          fprintf(stderr, "Padding segment %ld to 500ms (ignored in stats)", segments.size()+1);
+        }
+
         segments.push_back(std::make_pair(start, duration));
     }
 
@@ -251,10 +262,13 @@ void whisper_print_segment_callback(struct whisper_context * ctx, int n_new, voi
         }
 
         if (!params.no_timestamps) {
-            if (params.segments.size() > 0)
-                printf("[%d %s --> %s]  ", params.current_segment, to_timestamp(t0).c_str(), to_timestamp(t1).c_str());
-            else
+            if (params.segments.size() > 0) {
+                // add start-ms of segment to timestamps
+                int32_t o = params.segments[params.current_segment].first / 10;
+                printf("[%d %s --> %s]  ", params.current_segment, to_timestamp(t0 + o).c_str(), to_timestamp(t1 + o).c_str());
+            } else {
                 printf("[%s --> %s]  ", to_timestamp(t0).c_str(), to_timestamp(t1).c_str());
+            }
         }
 
         if (params.diarize && pcmf32s.size() == 2) {
@@ -659,10 +673,13 @@ int main(int argc, char ** argv) {
             } else {
                 for (int i = 0; i < params.segments.size(); i++) {
                     params.current_segment = i;
-                    wparams.offset_ms        = params.segments[i].first;
-                    wparams.duration_ms      = params.segments[i].second;
 
-                    if (whisper_full_parallel(ctx, wparams, pcmf32.data(), pcmf32.size(), params.n_processors) != 0) {
+                    // data is 16khz == 16 samples per ms
+                    std::vector<float>::const_iterator start = pcmf32.begin() + params.segments[i].first * 16;
+                    std::vector<float>::const_iterator end = start + params.segments[i].second * 16;
+                    std::vector<float> pcmf32_seg(start, end);
+
+                    if (whisper_full_parallel(ctx, wparams, pcmf32_seg.data(), pcmf32_seg.size(), params.n_processors) != 0) {
                         fprintf(stderr, "%s: failed to process audio\n", argv[0]);
                         return 10;
                     }

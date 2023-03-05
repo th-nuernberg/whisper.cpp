@@ -4,8 +4,10 @@
 
 #include <cmath>
 #include <fstream>
+#include <iterator>
 #include <cstdio>
 #include <string>
+#include <sstream>
 #include <thread>
 #include <vector>
 #include <utility>
@@ -41,32 +43,61 @@ std::vector<std::pair<int32_t, int32_t>> segments_from_file(const char *fname) {
     std::ifstream ifs(fname);
 
     if (!ifs) {
-        fprintf(stderr, "Failed to open file %s\n", fname);
+        fprintf(stderr, "%s: Failed to open file %s\n", __func__, fname);
         exit(1);
     }
 
     int32_t start, duration;
     int32_t total_duration = 0;
     std::vector<std::pair<int32_t, int32_t>> segments = {};
-    while(!ifs.eof()) {
-        ifs >> start >> duration;
+    std::string line;
+    int32_t lc = 0;
+    std::vector<int32_t> padded = {};
+    bool warned = false;
+    while(std::getline(ifs, line)) {
+        lc++;
+
+        if (line.length() == 0 || (line.length() > 0 && line[0] == '#'))
+          continue;
+
+        std::istringstream iss(line);
+        if (!(iss >> start >> duration)) {
+            fprintf(stderr, "%s: Ignoring invalid line %d: %s\n", __func__, lc, line.c_str());
+            continue;
+        }
+
         if (start < 0) {
-          fprintf(stderr, "Invalid start offset for segment %ld", segments.size()+1);
+          fprintf(stderr, "%s: Invalid start offset in line %d\n", __func__, lc);
           exit (1);
         }
 
         total_duration += duration;
 
-        // ensure minimum of half second duration
-        if (duration < 500) {
-          fprintf(stderr, "Padding segment %ld to 500ms (ignored in stats)", segments.size()+1);
+        if (duration < 1000) {
+            if (!warned) {
+              fprintf(stderr, "%s: Padding segment duration in line %d to 1s (see issue #39: https://github.com/ggerganov/whisper.cpp/issues/39 (no further warning)\n)", __func__, lc);
+              warned = true;
+            }
+            padded.push_back(lc);
+            duration = 1000;
         }
 
         segments.push_back(std::make_pair(start, duration));
     }
 
-    fprintf(stderr, "Read in %lu segments (%.3f seconds)\n", segments.size(), total_duration/1000.);
+    if (segments.size() == 0) {
+        fprintf(stderr, "%s: No segments found, aborting.\n", __func__);
+        exit(1);
+    }
+
+    fprintf(stderr, "%s: Read in %lu segments (%.3f seconds)\n", __func__, segments.size(), total_duration/1000.);
     
+    if (padded.size() > 0) {
+        std::ostringstream oss;
+        std::copy(padded.begin(), padded.end(), std::ostream_iterator<int32_t>(oss, ", "));
+        fprintf(stderr, "%s: %lu segments padded to 1s: %s\n", __func__, padded.size(), oss.str().c_str());
+    }
+
     return segments;
 }
 
@@ -679,7 +710,7 @@ int main(int argc, char ** argv) {
                     std::vector<float>::const_iterator end = start + params.segments[i].second * 16;
                     std::vector<float> pcmf32_seg(start, end);
 
-                    if (whisper_full_parallel(ctx, wparams, pcmf32_seg.data(), pcmf32_seg.size(), params.n_processors) != 0) {
+                    if (whisper_full(ctx, wparams, pcmf32_seg.data(), pcmf32_seg.size()) != 0) {
                         fprintf(stderr, "%s: failed to process audio\n", argv[0]);
                         return 10;
                     }

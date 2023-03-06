@@ -36,10 +36,10 @@ std::string to_timestamp(int64_t t, bool comma = false) {
     return std::string(buf);
 }
 
-// Read segments from file. A segment is a whitespace separated tuple of
-// (start-ms, duration-ms); typically one tuple per line, but parser uses
-// pairwise ifstream pipe to int32_t.
-std::vector<std::pair<int32_t, int32_t>> segments_from_file(const char *fname) {
+// Read segments from file, line-by-line. A segment is a whitespace separated
+// pair of (start-ms, duration-ms); parser uses int64_t and ignores empty lines
+// and lines starting with #.
+std::vector<std::pair<int64_t, int64_t>> segments_from_file(const char *fname) {
     std::ifstream ifs(fname);
 
     if (!ifs) {
@@ -47,12 +47,12 @@ std::vector<std::pair<int32_t, int32_t>> segments_from_file(const char *fname) {
         exit(1);
     }
 
-    int32_t start, duration;
-    int32_t total_duration = 0;
-    std::vector<std::pair<int32_t, int32_t>> segments = {};
+    int64_t start, duration;
+    int64_t total_duration = 0;
+    std::vector<std::pair<int64_t, int64_t>> segments = {};
     std::string line;
-    int32_t lc = 0;
-    std::vector<int32_t> padded = {};
+    int64_t lc = 0;
+    std::vector<int64_t> padded = {};
     bool warned = false;
     while(std::getline(ifs, line)) {
         lc++;
@@ -62,12 +62,12 @@ std::vector<std::pair<int32_t, int32_t>> segments_from_file(const char *fname) {
 
         std::istringstream iss(line);
         if (!(iss >> start >> duration)) {
-            fprintf(stderr, "%s: Ignoring invalid line %d: %s\n", __func__, lc, line.c_str());
+            fprintf(stderr, "%s: Ignoring invalid line %ld: %s\n", __func__, lc, line.c_str());
             continue;
         }
 
         if (start < 0) {
-          fprintf(stderr, "%s: Invalid start offset in line %d\n", __func__, lc);
+          fprintf(stderr, "%s: Invalid start offset in line %ld\n", __func__, lc);
           exit (1);
         }
 
@@ -75,7 +75,7 @@ std::vector<std::pair<int32_t, int32_t>> segments_from_file(const char *fname) {
 
         if (duration < 1000) {
             if (!warned) {
-              fprintf(stderr, "%s: Padding segment duration in line %d to 1s (see issue #39: https://github.com/ggerganov/whisper.cpp/issues/39 (no further warning)\n)", __func__, lc);
+              fprintf(stderr, "%s: Padding segment duration in line %ld to 1s (see issue #39: https://github.com/ggerganov/whisper.cpp/issues/39 (no further warning)\n)", __func__, lc);
               warned = true;
             }
             padded.push_back(lc);
@@ -94,7 +94,7 @@ std::vector<std::pair<int32_t, int32_t>> segments_from_file(const char *fname) {
     
     if (padded.size() > 0) {
         std::ostringstream oss;
-        std::copy(padded.begin(), padded.end(), std::ostream_iterator<int32_t>(oss, ", "));
+        std::copy(padded.begin(), padded.end(), std::ostream_iterator<int64_t>(oss, ", "));
         fprintf(stderr, "%s: %lu segments padded to 1s: %s\n", __func__, padded.size(), oss.str().c_str());
     }
 
@@ -155,8 +155,8 @@ struct whisper_params {
 
     // this will be updated during decoding so that the output callback can
     // reference the current segment
-    int32_t current_segment = 0;
-    std::vector<std::pair<int32_t, int32_t>> segments = {};
+    int64_t current_segment = 0;
+    std::vector<std::pair<int64_t, int64_t>> segments = {};
 };
 
 void whisper_print_usage(int argc, char ** argv, const whisper_params & params);
@@ -295,8 +295,8 @@ void whisper_print_segment_callback(struct whisper_context * ctx, struct whisper
         if (!params.no_timestamps) {
             if (params.segments.size() > 0) {
                 // add start-ms of segment to timestamps
-                int32_t o = params.segments[params.current_segment].first / 10;
-                printf("[%d %s --> %s]  ", params.current_segment, to_timestamp(t0 + o).c_str(), to_timestamp(t1 + o).c_str());
+                int64_t o = params.segments[params.current_segment].first / 10;
+                printf("[%ld %s --> %s]  ", params.current_segment, to_timestamp(t0 + o).c_str(), to_timestamp(t1 + o).c_str());
             } else {
                 printf("[%s --> %s]  ", to_timestamp(t0).c_str(), to_timestamp(t1).c_str());
             }
